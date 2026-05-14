@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# 개인 IDE 워크스페이스 파일 (사람마다 다름)
+*.code-workspace
