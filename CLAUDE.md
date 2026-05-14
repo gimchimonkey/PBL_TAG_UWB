@@ -80,6 +80,8 @@ PBL_TAG_UWB/
 | [docs/uart-protocol.md](docs/uart-protocol.md) | BU01 Tag(STM32) → ESP32 UART 패킷 포맷 |
 | [docs/system-architecture.md](docs/system-architecture.md) | 전체 시스템 컴포넌트·데이터 흐름·3 Phase 운영 |
 | [docs/blocking-analysis.md](docs/blocking-analysis.md) | ESP32 블로킹 포인트 분석 + 비차단 설계 단계 |
+| [docs/uwb-phy-spec.md](docs/uwb-phy-spec.md) | DW1000 PHY 설정 + TWR cycle rate 튜닝 가이드 |
+| [docs/antenna-calibration.md](docs/antenna-calibration.md) | DW1000 antenna delay 캘리브레이션 절차 (bias 제거) |
 
 ### plans/ — 피처별 설계
 | 디렉토리 | 설명 |
