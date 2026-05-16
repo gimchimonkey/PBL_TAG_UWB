@@ -6,11 +6,11 @@ HardwareSerial TagSerial(1);
 
 #define TAG_RX 16
 
-// 앵커 식별자 (16-bit) — STM32 펌웨어가 송신하는 실제 값으로 채울 것
-#define ANCHOR1_ID 0x0001  // TODO
-#define ANCHOR2_ID 0x0002  // TODO
-#define ANCHOR3_ID 0x0003  // TODO
-#define ANCHOR4_ID 0x0004  // TODO
+// 앵커 식별자 (16-bit) — STM32 펌웨어 송신 ID와 일치 (실측 확인 완료)
+#define ANCHOR1_ID 0x0001
+#define ANCHOR2_ID 0x0002
+#define ANCHOR3_ID 0x0003
+#define ANCHOR4_ID 0x0004
 
 // 앵커 좌표 [m]
 static const float ANCHOR_X[4] = { 0.00f,  3.87f, 3.87f,  0.28f };  
@@ -62,7 +62,9 @@ static void parseAndStore(const char* line) {
     if (last_val[slot] >= 0.0f && fabsf(d_val - last_val[slot]) > DELTA_THRESH) {
         // last_val 이 0보다 크고, 거리값 - 이전 거리값 차이가 delta thresh보다 크면
         // 쓰레기값으로 인정. 그전값으로 그냥 덮어씌우기.
-        d_val_temp = last_val[slot];
+        //d_val_temp = last_val[slot];
+        //덮어씌울라했는데 내 생각에 전 값들이 outlier이면 그게 덮히니까
+        return; // 그냥 버리자.다음 패킷 받고
     }
     last_val[slot] = d_val_temp;
     //
@@ -146,44 +148,51 @@ static bool leastSquares(float* outX, float* outY, bool* anchor){
     return false;
 }
 
-// 6 cycle 누적창에서 "살아있다"고 인정할 최소 표본 수 (과반수)
-constexpr uint16_t MIN_SAMPLES = CYCLES / 2;
-
 static void tryComputePosition() {
-    // 이번 라인까지의 cycle 진행 체크 — anchor[] 스냅샷은 LS에 쓰지 않음
+    // 한 cycle = anchor 4개 다 받음
     int cnt = 0;
-    for(int i = 0; i < 4; i++){
-        if(gotDist[i]) cnt++;
-    }
-    if (cnt < 3) return;  // 이번 cycle 자체가 3개 미만이면 cycle 인정 안 함
+    bool anchor[4] = {false,false,false,false};
 
-    gotDist[0] = gotDist[1] = gotDist[2] = gotDist[3] = false;
+    for(int i = 0; i < 4; i++){
+        if(gotDist[i] == true){
+            cnt++;
+            anchor[i] = true;
+        }
+    }
+    if (cnt<3) return;  // 계산 못함 이땐 ㅇㅈ?
+
+    gotDist[0] = gotDist[1] = gotDist[2] = gotDist[3] = false;  // 다시 초기화
 
     cycles++;
-    if (cycles < CYCLES) return;
+    
+    if(cycles < CYCLES) return;
 
-    // 6 cycle 누적창 종료 — 표본 수 기준으로 살아있는 앵커 확정
-    bool anchor[4] = {false, false, false, false};
-    int alive = 0;
     for(int i = 0; i < 4; ++i){
-        if(dist_sample[i] >= MIN_SAMPLES){
-            dist[i] = dist_sum[i] / dist_sample[i];
-            anchor[i] = true;
-            alive++;
-        } else {
-            dist[i] = 0.0f;  // LS에 들어가지 않으므로 의미 없음 — 로그용
+        if(dist_sample[i]>0){
+            dist[i] = dist_sum[i]/dist_sample[i];
         }
+        else dist[i] = 0.0f;
         dist_sum[i] = 0.0f;
         dist_sample[i] = 0;
     }
-    cycles = 0;
-
-    if (alive < 3) return;  // 누적창 끝나도 3개 미만이면 측위 포기
 
     float x, y;
     if (leastSquares(&x, &y, anchor)) {
-        Serial.printf("Position: x=%.2f, y=%.2f (n=%d d1=%.2f d2=%.2f d3=%.2f d4=%.2f)\n",
-                      x, y, alive, dist[0], dist[1], dist[2], dist[3]);
+        // ── EMA 필터 ──
+        static float x_filt = 0.0f, y_filt = 0.0f;
+        static bool  filt_initialized = false;
+        const float alpha = 0.3f;  // 0.1(부드러움 강) ~ 0.5(반응 빠름)
+
+        if (!filt_initialized) {
+            x_filt = x;  y_filt = y;
+            filt_initialized = true;
+        } else {
+            x_filt = alpha * x + (1.0f - alpha) * x_filt;
+            y_filt = alpha * y + (1.0f - alpha) * y_filt;
+        }
+
+        Serial.printf("Position: x=%.2f, y=%.2f (d1=%.2f d2=%.2f d3=%.2f d4=%.2f)\n",
+                      x, y, dist[0], dist[1], dist[2], dist[3]);
     }
 }
 
@@ -203,7 +212,7 @@ void loop() {
         if (c == '\n' || c == '\r') {
             if (idx > 0) {
                 buf[idx] = '\0';
-               // Serial.println(buf);          // 수신 원문 그대로 PC로 흘림
+                Serial.println(buf);          // 수신 원문 그대로 PC로 흘림
                 parseAndStore(buf);
                 tryComputePosition();
                 idx = 0;
