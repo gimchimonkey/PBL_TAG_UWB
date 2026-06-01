@@ -3,8 +3,10 @@
 #include <stdio.h>
 
 HardwareSerial TagSerial(1);
+HardwareSerial MotorSerial(2);   // STM32 모터 제어기로 위치 송신
 
-#define TAG_RX 16
+#define TAG_RX    16
+#define MOTOR_TX  18   //(STM32 측 USART RX 핀과 연결)
 
 // 앵커 식별자 (16-bit) — STM32 펌웨어 송신 ID와 일치 (실측 확인 완료)
 #define ANCHOR1_ID 0x0001
@@ -13,14 +15,14 @@ HardwareSerial TagSerial(1);
 #define ANCHOR4_ID 0x0004
 
 // 앵커 좌표 [m]
-static const float ANCHOR_X[4] = { 0.00f,  3.87f, 3.87f,  0.28f };  
-static const float ANCHOR_Y[4] = { 0.00f, 0.0f, 3.76f,  3.76f };  
+static const float ANCHOR_X[4] = { 0.00f,  5.95f, 5.95f, 0.0f };
+static const float ANCHOR_Y[4] = { 0.00f, 0.0f, 5.0f,  5.0f };
 
-// 거리 보정 오프셋 (측정값 - 실제값)
-//
+// 오프셋 (측정값 - 실제값)
+
 static const float OFFSET[4] = {
 0.0f,
-0.0f,
+0.0f,  
 0.0f,
 0.0f
 };
@@ -28,7 +30,7 @@ static const float OFFSET[4] = {
 static float dist[4];
 static bool  gotDist[4];
 
-// 6 cycle 누적
+// cycle 누적 (출력 주기 ~1.7 Hz)
 constexpr uint8_t CYCLES   = 6;
 constexpr float   DELTA_THRESH = 0.30f;  // [m] outlier 판정 임계값
 
@@ -40,10 +42,10 @@ static uint8_t cycles = 0;
 static void parseAndStore(const char* line) {
     uint16_t addr;
     float    d;
-    if (sscanf(line, "Anchor: %hx, Distance: %fm", &addr, &d) != 2) return; 
+    if (sscanf(line, "Anchor: %hx, Distance: %fm", &addr, &d) != 2) return;
     // 입력이 제대로 들어오는지 확인. != 2 -> 값이 2개가 나와야 정상
     // 형식 안맞으면 0이나 1 반환. return
-    //둘다 잘 나오면 2 반환. 통과. 
+    //둘다 잘 나오면 2 반환. 통과.
     if (d <= 0.0f || d >= 50.0f) return;
     // 거리가 음수 나오거나 50m 같은 이상한 값 나오면 return
 
@@ -57,19 +59,20 @@ static void parseAndStore(const char* line) {
     }
     // d_val => 받아온 d - offset_d
     const float d_val = d - OFFSET[slot];
-    // outlier -> 이전값으로 대체
-    float d_val_temp = d_val;
-    if (last_val[slot] >= 0.0f && fabsf(d_val - last_val[slot]) > DELTA_THRESH) {
-        // last_val 이 0보다 크고, 거리값 - 이전 거리값 차이가 delta thresh보다 크면
-        // 쓰레기값으로 인정. 그전값으로 그냥 덮어씌우기.
-        //d_val_temp = last_val[slot];
-        //덮어씌울라했는데 내 생각에 전 값들이 outlier이면 그게 덮히니까
-        return; // 그냥 버리자.다음 패킷 받고
-    }
-    last_val[slot] = d_val_temp;
+
+    // ── DELTA_THRESH outlier rejection 일시 비활성 ──
+    // 이유: last_val이 옛값에 갇히면 anchor 영구 사망하는 락온 버그 발견 (anchor 2 사례)
+    // 6 cycle 평균이 노이즈 깎아주므로 일단 raw 그대로 받음
+    // 필요 시 복원: 거부할 때도 last_val 업데이트하거나, 일정 횟수 거부 후 last_val 리셋
     //
+    // float d_val_temp = d_val;
+    // if (last_val[slot] >= 0.0f && fabsf(d_val - last_val[slot]) > DELTA_THRESH) {
+    //     return; // 그냥 버리자. 다음 패킷 받고
+    // }
+    // last_val[slot] = d_val_temp;
+
     // mean용 누적
-    dist_sum[slot] += d_val_temp;
+    dist_sum[slot] += d_val;
     dist_sample[slot] += 1;
     gotDist[slot] = true;
 }
@@ -79,7 +82,7 @@ static void parseAndStore(const char* line) {
 //   2(xᵢ-x₁)·x + 2(yᵢ-y₁)·y = r₁² - rᵢ² + xᵢ² - x₁² + yᵢ² - y₁²
 // i=2,3,4 → 3개 선형식의 over-determined 계 A·p = b
 // 정규방정식 (AᵀA)·p = Aᵀ·b 를 2×2 닫힌형으로 푼다.
-// 기존에서 static bool leastSquares(float* outX, float* outY) 
+// 기존에서 static bool leastSquares(float* outX, float* outY)
 
 // static bool leastSquares(float* outX, float* outY) {
 //     const float x1   = ANCHOR_X[0];
@@ -98,10 +101,10 @@ static void parseAndStore(const char* line) {
 //     }
 //     const float det = Saa * Sbb - Sab * Sab;
 //     // 크래머 룰 쓰기 위한 det 값 계산
-//     if (fabsf(det) < 1e-6f) return false;  
-//     // det의 절댓값(fabsf)가 10^-6승 거의 0에 가까우면 
+//     if (fabsf(det) < 1e-6f) return false;
+//     // det의 절댓값(fabsf)가 10^-6승 거의 0에 가까우면
 //     // 호출자에게 false 값 반환.
-//     // 밑에 실행도 안됨. 
+//     // 밑에 실행도 안됨.
 //     *outX = (Sbb * Sac - Sab * Sbc) / det;
 //     *outY = (Saa * Sbc - Sab * Sac) / det;
 //     return true;
@@ -112,7 +115,7 @@ static bool leastSquares(float* outX, float* outY, bool* anchor){
     for(int i = 0; i<4 ;i++){
         if(anchor[i]){
             ref++;
-        } 
+        }
     }
     if(ref<3) return false;
 
@@ -121,12 +124,12 @@ static bool leastSquares(float* outX, float* outY, bool* anchor){
             const float x_ref = ANCHOR_X[i];
             const float y_ref = ANCHOR_Y[i];
             const float r_ref_sq = dist[i]*dist[i];
-            
+
             float Saa = 0, Sab = 0, Sbb = 0, Sac = 0, Sbc = 0;
             for(int j = 0; j<4; j++){
                 if(!anchor[j] || j == i) continue;
                 const float a = 2.0f*(ANCHOR_X[j] - x_ref);
-                const float b = 2.0f*(ANCHOR_Y[j] - y_ref);                
+                const float b = 2.0f*(ANCHOR_Y[j] - y_ref);
                 const float c = r_ref_sq - dist[j] * dist[j]
                        + ANCHOR_X[j] * ANCHOR_X[j] - x_ref * x_ref
                        + ANCHOR_Y[j] * ANCHOR_Y[j] - y_ref * y_ref;
@@ -136,10 +139,10 @@ static bool leastSquares(float* outX, float* outY, bool* anchor){
 
         const float det = Saa * Sbb - Sab * Sab;
         // 크래머 룰 쓰기 위한 det 값 계산
-        if (fabsf(det) < 1e-6f) return false;  
-        // det의 절댓값(fabsf)가 10^-6승 거의 0에 가까우면 
+        if (fabsf(det) < 1e-6f) return false;
+        // det의 절댓값(fabsf)가 10^-6승 거의 0에 가까우면
         // 호출자에게 false 값 반환.
-         // 밑에 실행도 안됨. 
+         // 밑에 실행도 안됨.
         *outX = (Sbb * Sac - Sab * Sbc) / det;
         *outY = (Saa * Sbc - Sab * Sac) / det;
         return true;
@@ -149,32 +152,39 @@ static bool leastSquares(float* outX, float* outY, bool* anchor){
 }
 
 static void tryComputePosition() {
-    // 한 cycle = anchor 4개 다 받음
+    // 이 라인까지 anchor가 3개 이상 모이면 cycle 1개 인정
+    // (anchor[] 스냅샷은 여기서 만들지 않음 — 누적창 끝나는 시점에 dist_sample 기준으로 재결정)
     int cnt = 0;
-    bool anchor[4] = {false,false,false,false};
-
     for(int i = 0; i < 4; i++){
-        if(gotDist[i] == true){
-            cnt++;
-            anchor[i] = true;
-        }
+        if(gotDist[i]) cnt++;
     }
-    if (cnt<3) return;  // 계산 못함 이땐 ㅇㅈ?
+    if (cnt < 3) return;
 
-    gotDist[0] = gotDist[1] = gotDist[2] = gotDist[3] = false;  // 다시 초기화
+    gotDist[0] = gotDist[1] = gotDist[2] = gotDist[3] = false;
 
     cycles++;
-    
     if(cycles < CYCLES) return;
 
+    // ── 누적창 종료: 표본 수 기준으로 anchor[] 재결정 ──
+    // 6 cycle 중 MIN_SAMPLES(=3) 회 이상 응답한 anchor만 LS에 포함
+    // → 매 cycle마다 다른 3-anchor 조합이 선택되는 점프 문제 해결
+    bool anchor[4] = {false, false, false, false};
+    int alive = 0;
+    constexpr uint16_t MIN_SAMPLES = CYCLES / 2;
     for(int i = 0; i < 4; ++i){
-        if(dist_sample[i]>0){
-            dist[i] = dist_sum[i]/dist_sample[i];
+        if(dist_sample[i] >= MIN_SAMPLES){
+            dist[i] = dist_sum[i] / dist_sample[i];
+            anchor[i] = true;
+            alive++;
+        } else {
+            dist[i] = 0.0f;
         }
-        else dist[i] = 0.0f;
         dist_sum[i] = 0.0f;
         dist_sample[i] = 0;
     }
+    cycles = 0;
+
+    if (alive < 3) return;
 
     float x, y;
     if (leastSquares(&x, &y, anchor)) {
@@ -191,16 +201,23 @@ static void tryComputePosition() {
             y_filt = alpha * y + (1.0f - alpha) * y_filt;
         }
 
-        Serial.printf("Position: x=%.2f, y=%.2f (d1=%.2f d2=%.2f d3=%.2f d4=%.2f)\n",
-                      x, y, dist[0], dist[1], dist[2], dist[3]);
+        Serial.printf("Position raw=(%.2f, %.2f) filt=(%.2f, %.2f) | d1=%.2f d2=%.2f d3=%.2f d4=%.2f\n",
+                      x, y, x_filt, y_filt, dist[0], dist[1], dist[2], dist[3]);
+
+        // STM32 모터 제어기로 필터링된 위치 송신 (ASCII)
+        // 포맷: "<x>, <y>\n"  — STM32에서 sscanf("%f, %f", &x, &y) 로 파싱
+        MotorSerial.printf("%.2f, %.2f\n", x_filt, y_filt);
     }
 }
 
-void setup() {
+void setup() {    
     Serial.begin(115200);
-    TagSerial.begin(115200, SERIAL_8N1, TAG_RX, -1);
+    TagSerial.begin(115200, SERIAL_8N1, TAG_RX, -1);          // Tag 수신 전용 (RX=GPIO16)
+    MotorSerial.begin(9600, SERIAL_8N1, -1, MOTOR_TX);         // STM32 송신 전용 (TX=GPIO18)
     delay(2000);
+
     Serial.println("ESP32 Localization (LS, 4-anchor) Ready");
+    Serial.println("STM32 송신 활성: GPIO18 → STM32 RX, 9600 8N1");
 }
 
 void loop() {
